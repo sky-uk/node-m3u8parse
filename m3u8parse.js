@@ -193,42 +193,6 @@ M3U8Playlist.prototype.keyForSeqNo = function(seqNo) {
   return key;
 };
 
-M3U8Playlist.prototype.byterangeForSeqNo = function(seqNo) {
-  var seqIndex = seqNo - this.first_seq_no;
-  var seqSegment = this.segments[seqIndex] || null;
-  if (!seqSegment || !seqSegment.byterange) return null;
-
-  var length = parseInt(seqSegment.byterange.length, 10);
-  if (isNaN(length)) return null;
-
-  var offset = parseInt(seqSegment.byterange.offset, 10);
-  if (isNaN(offset)) {
-    // compute actual value from history
-    offset = 0;
-
-    for (var idx = seqIndex-1; idx >= 0; idx--) {
-      var segment = this.segments[idx];
-      if (segment.uri !== seqSegment.uri) continue;
-      if (!segment.byterange) break; // consistency error
-
-      var segmentLength = parseInt(segment.byterange.length, 10);
-      var segmentOffset = parseInt(segment.byterange.offset, 10);
-      if (isNaN(segmentLength)) break; // consistency error
-
-      offset += segmentLength;
-      if (!isNaN(segmentOffset)) {
-        offset += segmentOffset;
-        break;
-      }
-    }
-  }
-
-  return {
-    length: length,
-    offset: offset
-  };
-};
-
 M3U8Playlist.prototype.mapForSeqNo = function(seqNo) {
   return lastSegmentProperty(this, 'map', seqNo, function(segment) {
     return segment.discontinuity; // abort on discontinuity
@@ -241,11 +205,9 @@ M3U8Playlist.prototype.getSegment = function(seqNo, independent) {
   var segment = this.segments[index] || null;
   if (independent && segment) {
     segment = new M3U8Segment(segment);
-    // EXT-X-KEY, EXT-X-MAP, EXT-X-PROGRAM-DATE-TIME, EXT-X-BYTERANGE needs to be individualized
+    // EXT-X-KEY, EXT-X-MAP, EXT-X-PROGRAM-DATE-TIME needs to be individualized
     segment.program_time = this.dateForSeqNo(seqNo);
     segment.key = this.keyForSeqNo(seqNo);
-    if (this.version >= 4)
-      segment.byterange = this.byterangeForSeqNo(seqNo);
     if (this.version >= 5)
       segment.map = this.mapForSeqNo(seqNo);
     // note: 'uri' is not resolved to an absolute url, since it principally opaque
@@ -253,7 +215,7 @@ M3U8Playlist.prototype.getSegment = function(seqNo, independent) {
   return segment;
 };
 
-M3U8Playlist.prototype.toString = function() {
+M3U8Playlist.prototype.toManifest = function() {
   var m3u8 = '#EXTM3U\n';
 
   if (this.version > 1)
@@ -355,9 +317,14 @@ function M3U8Segment(uri, meta, version) {
     this.program_time = new Date(meta.program_time);
   if (meta.key)
     this.key = new AttrList(meta.key);
+    
+  if (meta.cue_span)
+      this.cue_span = new AttrList(meta.cue_span);
+  if (meta.cue_in)
+      this.cue_in = new AttrList(meta.cue_in);
+  if (meta.cue_out)
+      this.cue_out = new AttrList(meta.cue_out);
 
-  if (version >= 4 && meta.byterange)
-    this.byterange = clone(meta.byterange);
   if (version >= 5 && meta.map)
     this.map = new AttrList(meta.map);
 
@@ -366,7 +333,7 @@ function M3U8Segment(uri, meta, version) {
     this.vendor = clone(meta.vendor);
 }
 
-M3U8Segment.prototype.toString = function() {
+M3U8Segment.prototype.toManifest = function() {
   var res = '';
   if (this.discontinuity) res += '#EXT-X-DISCONTINUITY\n';
   if (this.program_time) {
@@ -375,9 +342,13 @@ M3U8Segment.prototype.toString = function() {
   }
   if (this.key) res += '#EXT-X-KEY:' + AttrList(this.key) + '\n';
   if (this.map) res += '#EXT-X-MAP:' + AttrList(this.map) + '\n';
-  if (this.byterange && (this.byterange.length || this.byterange.length === 0)) {
+  if (this.cue_span) res += '#EXT-X-CUE-SPAN:' + AttrList(this.cue_span) + '\n';
+  if (this.cue_in) res += '#EXT-X-CUE-IN:' + AttrList(this.cue_in) + '\n';
+  if (this.cue_out) res += '#EXT-X-CUE-OUT:' + AttrList(this.cue_out) + '\n';
+    
+  if (this.byterange && (this.byterange.length + this.byterange.offset)) {
     var range = '' + this.byterange.length;
-    if (this.byterange.offset || this.byterange.offset === 0)
+    if (this.byterange.offset)
       range += '@' + this.byterange.offset;
     res += '#EXT-X-BYTERANGE:' + range + '\n';
   }
@@ -497,9 +468,9 @@ function M3U8Parse(stream, options, cb) {
 
       var attrname;
       if (m3u8.version >= 4)
-        for (attrname in extParserV4) { extParser[attrname] = extParserV4[attrname]; }
+        for (attrname in extParserV4) { extParser[attrname] = extParser[attrname]; }
       if (m3u8.version >= 5)
-        for (attrname in extParserV5) { extParser[attrname] = extParserV5[attrname]; }
+        for (attrname in extParserV5) { extParser[attrname] = extParser[attrname]; }
     },
     '#EXT-X-TARGETDURATION': function(arg) {
       m3u8.target_duration = parseInt(arg, 10);
@@ -572,6 +543,16 @@ function M3U8Parse(stream, options, cb) {
         m3u8.iframes[id] = [];
 
       m3u8.iframes[id].push(attrs);
+    },
+    // Added by Olly
+    '#EXT-X-CUE-SPAN': function(arg) {
+      meta.cue_span = new AttrList(arg);
+    },
+    '#EXT-X-CUE-IN': function(arg) {
+      meta.cue_in = new AttrList(arg);
+    },
+    '#EXT-X-CUE-OUT': function(arg) {
+      meta.cue_out = new AttrList(arg);
     }
   };
 
